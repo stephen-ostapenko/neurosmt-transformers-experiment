@@ -105,7 +105,7 @@ def get_list_of_suitable_samples(path_to_dataset_root, tokenizer):
 			if len(formula) <= FORMULA_MAX_LENGTH_IN_TOKENS:
 				suitable_paths.append(path)
 	
-	print(len(suitable_paths))
+	print(f"got {len(suitable_paths)} correct samples overall")
 	return suitable_paths
 
 
