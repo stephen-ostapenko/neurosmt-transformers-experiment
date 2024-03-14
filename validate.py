@@ -12,7 +12,7 @@ from torch.utils.data import Dataset, DataLoader
 from torchmetrics.functional.classification import binary_confusion_matrix
 
 from transformers import AutoTokenizer
-from transformers import AutoModel
+from transformers import AutoModelForSequenceClassification
 
 import evaluate
 import datasets
@@ -99,12 +99,12 @@ def get_dataset(stage, dataset_labels):
 	file_paths = get_file_paths(stage, dataset_labels)
 	if "SHRINK" in os.environ:
 		file_paths = file_paths[:int(os.environ["SHRINK"])]
-	
+
 	formulas, labels = [], []
 	for file_path in tqdm(file_paths, "reading files with formulas"):
 		with open(file_path, "r") as f:
 			formula = f.read()
-		
+
 		label = 0 if file_path.endswith("-unsat") else 1
 
 		formulas.append(formula)
@@ -134,7 +134,11 @@ def evaluate_model_on_dataset(model, dataset, tokenizer):
 	dataset.set_format("torch")
 
 	device = model.device
+	if str(device) == "cpu" and torch.cuda.is_available():
+		device = torch.device("cuda:0")
+
 	print("\n", device, "\n", sep="")
+	model = model.to(device)
 
 	dataloader = DataLoader(dataset, batch_size=DEVICE_VAL_BATCH_SIZE)
 
@@ -152,7 +156,7 @@ def evaluate_model_on_dataset(model, dataset, tokenizer):
 
 		scores = torch.softmax(out.logits, dim=-1)[:, 1]
 		predictions = torch.argmax(out.logits, dim=-1)
-		
+
 		for metric_name, metric in metric_evaluators.items():
 			if metric_name.endswith("roc_auc"):
 				metric.add_batch(references=batch["label"], prediction_scores=scores)
@@ -192,8 +196,8 @@ def run_gpt2_evaluation(model_name, dataset_labels):
 	train_ds.setup(tokenizer, FORMULA_MAX_LENGTH_IN_TOKENS)
 	val_ds.setup(tokenizer, FORMULA_MAX_LENGTH_IN_TOKENS)
 	test_ds.setup(tokenizer, FORMULA_MAX_LENGTH_IN_TOKENS)
-	
-	model = AutoModel.from_pretrained(f"{model_name}-best", local_files_only=True)
+
+	model = AutoModelForSequenceClassification.from_pretrained(f"{model_name}-best", local_files_only=True)
 
 	evaluate_model_on_dataset(model, train_ds, tokenizer)
 	evaluate_model_on_dataset(model, val_ds, tokenizer)
