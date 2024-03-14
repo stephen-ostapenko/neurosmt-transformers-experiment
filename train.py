@@ -25,6 +25,7 @@ VOCAB_SIZE = 2 ** 17
 FORMULA_MAX_LENGTH_IN_TOKENS = 1024
 TOKENIZER_BATCH_SIZE = 2 ** 10
 
+GRADIENT_ACCUMULATION_STEPS = 8
 DEVICE_TRAIN_BATCH_SIZE = 8
 DEVICE_VAL_BATCH_SIZE = 64
 
@@ -258,10 +259,12 @@ def run_gpt2_experiment(model_name, dataset_labels, train_model, train_tokenizer
 
 		training_args = transformers.TrainingArguments(
 			output_dir=model_name,
-			# learning_rate=2e-4,
 			per_device_train_batch_size=DEVICE_TRAIN_BATCH_SIZE,
 			per_device_eval_batch_size=DEVICE_VAL_BATCH_SIZE,
 			num_train_epochs=TRAIN_EPOCHS,
+			gradient_accumulation_steps=GRADIENT_ACCUMULATION_STEPS,
+			# learning_rate=2e-4,
+			weight_decay=0.01,
 			evaluation_strategy="epoch",
 			save_strategy="epoch",
 			load_best_model_at_end=True,
@@ -290,10 +293,12 @@ def run_gpt2_experiment(model_name, dataset_labels, train_model, train_tokenizer
 
 		training_args = transformers.TrainingArguments(
 			output_dir=model_name,
-			# learning_rate=2e-4,
 			per_device_train_batch_size=DEVICE_TRAIN_BATCH_SIZE,
 			per_device_eval_batch_size=DEVICE_VAL_BATCH_SIZE,
 			num_train_epochs=FINETUNE_EPOCHS,
+			gradient_accumulation_steps=GRADIENT_ACCUMULATION_STEPS,
+			# learning_rate=2e-4,
+			weight_decay=0.01,
 			evaluation_strategy="epoch",
 			save_strategy="epoch",
 			load_best_model_at_end=True,
