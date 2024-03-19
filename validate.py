@@ -2,6 +2,7 @@
 
 import sys
 import os
+from argparse import ArgumentParser
 
 from tqdm import tqdm
 import numpy as np
@@ -22,7 +23,11 @@ import datasets
 FORMULA_MAX_LENGTH_IN_TOKENS = 1024
 TOKENIZER_BATCH_SIZE = 2 ** 10
 
-DEVICE_VAL_BATCH_SIZE = 16
+DEVICE_VAL_BATCH_SIZE = os.environ["DEVICE_VAL_BATCH_SIZE"]
+if DEVICE_VAL_BATCH_SIZE is None:
+	DEVICE_VAL_BATCH_SIZE = 2
+else:
+	DEVICE_VAL_BATCH_SIZE = int(DEVICE_VAL_BATCH_SIZE)
 
 torch.set_num_threads(16)
 
@@ -86,18 +91,19 @@ class FormulaDataset(Dataset):
 		return self.samples[index]
 
 
-def get_file_paths(stage, dataset_labels):
+def get_file_paths(stages, dataset_labels):
 	file_paths = []
 	
 	for ds in dataset_labels:
-		with open(f"dataset/{ds}/__meta/{stage}", "r") as f:
-			file_paths += [f"dataset/{ds}/{file_path.strip()}" for file_path in f.readlines()]
+		for stage in stages:
+			with open(f"dataset/{ds}/__meta/{stage}", "r") as f:
+				file_paths += [f"dataset/{ds}/{file_path.strip()}" for file_path in f.readlines()]
 
 	return file_paths
 
 
-def get_dataset(stage, dataset_labels):
-	file_paths = get_file_paths(stage, dataset_labels)
+def get_dataset(stages, dataset_labels):
+	file_paths = get_file_paths(stages, dataset_labels)
 	if "SHRINK" in os.environ:
 		file_paths = file_paths[:int(os.environ["SHRINK"])]
 
@@ -111,7 +117,7 @@ def get_dataset(stage, dataset_labels):
 		formulas.append(formula)
 		labels.append(label)
 
-	return FormulaDataset(formulas, labels, stage)
+	return FormulaDataset(formulas, labels, "/".join(stages))
 
 
 def print_confusion_matrix(conf_mat):
@@ -194,27 +200,53 @@ def evaluate_model_on_dataset(model, dataset, tokenizer):
 	print_confusion_matrix(conf_mat)
 
 
-def run_gpt2_evaluation(model_name, dataset_labels):
+def run_gpt2_evaluation(model_name, dataset_labels, merge_stages):
 	print(f"\nevaluating {model_name} on {dataset_labels}\n")
 
-	train_ds = get_dataset("train", dataset_labels)
-	val_ds = get_dataset("val", dataset_labels)
-	test_ds = get_dataset("test", dataset_labels)
-
 	tokenizer = AutoTokenizer.from_pretrained(f"{model_name}-tokenizer", local_files_only=True)
-
-	train_ds.setup(tokenizer, FORMULA_MAX_LENGTH_IN_TOKENS)
-	val_ds.setup(tokenizer, FORMULA_MAX_LENGTH_IN_TOKENS)
-	test_ds.setup(tokenizer, FORMULA_MAX_LENGTH_IN_TOKENS)
-
 	model = AutoModelForSequenceClassification.from_pretrained(f"{model_name}-best", local_files_only=True)
 
-	evaluate_model_on_dataset(model, train_ds, tokenizer)
-	evaluate_model_on_dataset(model, val_ds, tokenizer)
-	evaluate_model_on_dataset(model, test_ds, tokenizer)
+	if merge_stages:
+		ds = get_dataset(["train", "val", "test"], dataset_labels)
 
+		ds.setup(tokenizer, FORMULA_MAX_LENGTH_IN_TOKENS)
+
+		evaluate_model_on_dataset(model, ds, tokenizer)
+
+	else:
+		train_ds = get_dataset(["train"], dataset_labels)
+		val_ds = get_dataset(["val"], dataset_labels)
+		test_ds = get_dataset(["test"], dataset_labels)
+
+		train_ds.setup(tokenizer, FORMULA_MAX_LENGTH_IN_TOKENS)
+		val_ds.setup(tokenizer, FORMULA_MAX_LENGTH_IN_TOKENS)
+		test_ds.setup(tokenizer, FORMULA_MAX_LENGTH_IN_TOKENS)
+
+		evaluate_model_on_dataset(model, train_ds, tokenizer)
+		evaluate_model_on_dataset(model, val_ds, tokenizer)
+		evaluate_model_on_dataset(model, test_ds, tokenizer)
+
+
+def get_args():
+	parser = ArgumentParser(description="validation script")
+	parser.add_argument("--name", required=True)
+	parser.add_argument("--ds", required=True, nargs="+")
+	parser.add_argument("--merge_stages", action="store_true")
+
+	args = parser.parse_args()
+	print("args:")
+	for arg in vars(args):
+		print(arg, "=", getattr(args, arg))
+
+	print()
+
+	return args
+
+
+args = get_args()
 
 run_gpt2_evaluation(
-	model_name=sys.argv[1],
-	dataset_labels=sys.argv[2:],
+	model_name=args.name,
+	dataset_labels=args.ds,
+	merge_stages=args.merge_stages,
 )
