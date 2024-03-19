@@ -109,6 +109,18 @@ def get_list_of_suitable_samples(path_to_dataset_root, tokenizer):
 	return suitable_paths
 
 
+def train_val_test_indices(cnt: int, val_qty: float = 0.15, test_qty: float = 0.1)\
+		-> tuple[np.ndarray, np.ndarray, np.ndarray]:
+
+	perm = np.arange(cnt)
+	np.random.shuffle(perm)
+
+	val_cnt = int(cnt * val_qty)
+	test_cnt = int(cnt * test_qty)
+
+	return perm[val_cnt + test_cnt:], perm[:val_cnt], perm[val_cnt:val_cnt + test_cnt]
+
+
 def calc_group_weights(path_to_dataset_root, tokenizer, list_of_suitable_samples):
 	groups = dict()
 	for path_to_sample in list_of_suitable_samples:
@@ -168,6 +180,38 @@ def align_sat_unsat_sizes(sat_data: list[str], unsat_data: list[str], mode: str)
 		raise Exception(f"unknown sampling mode {mode}")
 
 
+def classic_random_split(
+	path_to_dataset_root, tokenizer,
+	val_qty, test_qty,
+	align_train_mode, align_val_mode, align_test_mode
+):
+	list_of_suitable_samples = get_list_of_suitable_samples(path_to_dataset_root, tokenizer)
+	sat_paths = [path for path in list_of_suitable_samples if path.endswith("-sat")]
+	unsat_paths = [path for path in list_of_suitable_samples if path.endswith("-unsat")]
+
+	def split_data_to_train_val_test(data):
+		train_ind, val_ind, test_ind = train_val_test_indices(len(data), val_qty=val_qty, test_qty=test_qty)
+
+		return [data[i] for i in train_ind], [data[i] for i in val_ind], [data[i] for i in test_ind]
+
+	sat_train, sat_val, sat_test = split_data_to_train_val_test(sat_paths)
+	unsat_train, unsat_val, unsat_test = split_data_to_train_val_test(unsat_paths)
+
+	sat_train, unsat_train = align_sat_unsat_sizes(sat_train, unsat_train, align_train_mode)
+	sat_val, unsat_val = align_sat_unsat_sizes(sat_val, unsat_val, align_val_mode)
+	sat_test, unsat_test = align_sat_unsat_sizes(sat_test, unsat_test, align_test_mode)
+
+	train_data = sat_train + unsat_train
+	val_data = sat_val + unsat_val
+	test_data = sat_test + unsat_test
+
+	np.random.shuffle(train_data)
+	np.random.shuffle(val_data)
+	np.random.shuffle(test_data)
+
+	return train_data, val_data, test_data
+
+
 def grouped_random_split(
 	path_to_dataset_root, tokenizer,
 	val_qty, test_qty,
@@ -194,7 +238,7 @@ def grouped_random_split(
 
 		for _ in trange(attempts):
 			probs = (np.array([need_train, need_val, need_test]) / samples_cnt + \
-				     np.array([1, 1, 1]) / 3) / 2
+					 np.array([1, 1, 1]) / 3) / 2
 			
 			cur_split = np.random.choice(
 				range(3), size=groups_cnt,
@@ -259,13 +303,22 @@ def grouped_random_split(
 def create_split(
 	path_to_dataset_root, tokenizer,
 	val_qty, test_qty,
-	align_train_mode, align_val_mode, align_test_mode
+	align_train_mode, align_val_mode, align_test_mode,
+	grouped
 ):
-	train_data, val_data, test_data = grouped_random_split(
-		path_to_dataset_root, tokenizer,
-		val_qty, test_qty,
-		align_train_mode, align_val_mode, align_test_mode
-	)
+	if grouped:
+		train_data, val_data, test_data = grouped_random_split(
+			path_to_dataset_root, tokenizer,
+			val_qty, test_qty,
+			align_train_mode, align_val_mode, align_test_mode
+		)
+
+	else:
+		train_data, val_data, test_data = classic_random_split(
+			path_to_dataset_root, tokenizer,
+			val_qty, test_qty,
+			align_train_mode, align_val_mode, align_test_mode
+		)
 
 	print("\nstats:", flush=True)
 	print(f"train: {len(train_data)}")
@@ -307,6 +360,8 @@ def get_args():
 	parser.add_argument("--align_val", choices=["none", "upsample", "downsample"], default="none")
 	parser.add_argument("--align_test", choices=["none", "upsample", "downsample"], default="none")
 
+	parser.add_argument("--grouped", action="store_true")
+
 	args = parser.parse_args()
 	print("args:")
 	for arg in vars(args):
@@ -328,4 +383,5 @@ if __name__ == "__main__":
 		args.ds, tokenizer,
 		args.val_qty, args.test_qty,
 		args.align_train, args.align_val, args.align_test,
+		args.grouped
 	)
