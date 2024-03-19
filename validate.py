@@ -9,6 +9,7 @@ import numpy as np
 import torch
 from torch.utils.data import Dataset, DataLoader
 
+from torchmetrics.classification import BinaryAveragePrecision
 from torchmetrics.functional.classification import binary_confusion_matrix
 
 from transformers import AutoTokenizer
@@ -21,7 +22,7 @@ import datasets
 FORMULA_MAX_LENGTH_IN_TOKENS = 1024
 TOKENIZER_BATCH_SIZE = 2 ** 10
 
-DEVICE_VAL_BATCH_SIZE = 64
+DEVICE_VAL_BATCH_SIZE = 16
 
 torch.set_num_threads(16)
 
@@ -128,6 +129,9 @@ def print_confusion_matrix(conf_mat):
 
 def evaluate_model_on_dataset(model, dataset, tokenizer):
 	print(f"\nevaluating on {dataset.stage} dataset (len is {len(dataset)})\n")
+	if len(dataset) == 0:
+		print("skipping")
+		return
 
 	dataset = datasets.Dataset.from_generator(dataset.get_iterator)
 	dataset = dataset.map(lambda s: tokenizer(s["text"], truncation=True, padding="max_length"), batched=True)
@@ -146,6 +150,7 @@ def evaluate_model_on_dataset(model, dataset, tokenizer):
 		metric_name: evaluate.load(metric_name) \
 			for metric_name in ["accuracy", "precision", "recall", "f1", "roc_auc"]
 	}
+	metric_evaluators["avg_precision"] = BinaryAveragePrecision()
 
 	all_outputs, all_targets = [], []
 	for batch in tqdm(dataloader):
@@ -160,6 +165,8 @@ def evaluate_model_on_dataset(model, dataset, tokenizer):
 		for metric_name, metric in metric_evaluators.items():
 			if metric_name.endswith("roc_auc"):
 				metric.add_batch(references=batch["label"], prediction_scores=scores)
+			elif metric_name == "avg_precision":
+				metric.update(target=batch["label"], preds=scores)
 			else:
 				metric.add_batch(references=batch["label"], predictions=predictions)
 
@@ -168,11 +175,14 @@ def evaluate_model_on_dataset(model, dataset, tokenizer):
 
 	metrics_dict = dict()
 	for metric_name, metric in metric_evaluators.items():
-		metrics_dict[metric_name] = list(metric.compute().values())[0]
+		if metric_name == "avg_precision":
+			metrics_dict[metric_name] = metric.compute().item()
+		else:
+			metrics_dict[metric_name] = list(metric.compute().values())[0]
 
 	print()
 	for metric_name, metric_value in metrics_dict.items():
-		print(metric_name.rjust(11, " "), ":", metric_value)
+		print(metric_name.rjust(15, " "), ":", metric_value)
 
 	all_outputs = torch.flatten(torch.cat(all_outputs))
 	all_targets = torch.flatten(torch.cat(all_targets))
