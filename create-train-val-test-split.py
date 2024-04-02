@@ -121,7 +121,7 @@ def train_val_test_indices(cnt: int, val_qty: float = 0.15, test_qty: float = 0.
 	return perm[val_cnt + test_cnt:], perm[:val_cnt], perm[val_cnt:val_cnt + test_cnt]
 
 
-def calc_group_weights(path_to_dataset_root, tokenizer, list_of_suitable_samples):
+def calc_group_weights(list_of_suitable_samples):
 	groups = dict()
 	for path_to_sample in list_of_suitable_samples:
 		group = path_to_sample.split("/")[0].strip()
@@ -218,7 +218,7 @@ def grouped_random_split(
 	align_train_mode, align_val_mode, align_test_mode
 ):
 	list_of_suitable_samples = get_list_of_suitable_samples(path_to_dataset_root, tokenizer)
-	groups = calc_group_weights(path_to_dataset_root, tokenizer, list_of_suitable_samples)
+	groups = calc_group_weights(list_of_suitable_samples)
 
 	def pick_best_split(groups):
 		attempts = 1_000_000
@@ -240,10 +240,7 @@ def grouped_random_split(
 			probs = (np.array([need_train, need_val, need_test]) / samples_cnt + \
 					 np.array([1, 1, 1]) / 3) / 2
 			
-			cur_split = np.random.choice(
-				range(3), size=groups_cnt,
-				p=probs
-			)
+			cur_split = np.random.choice(range(3), size=groups_cnt, p=probs)
 
 			train_size = sum(groups[i][1] for i in range(groups_cnt) if cur_split[i] == 0)
 			val_size = sum(groups[i][1] for i in range(groups_cnt) if cur_split[i] == 1)
