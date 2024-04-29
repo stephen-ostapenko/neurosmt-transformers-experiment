@@ -13,7 +13,7 @@ from transformers import AutoTokenizer
 
 
 METADATA_PATH = "__meta"
-VOCAB_SIZE = 2 ** 17
+VOCAB_SIZE = 2 ** 14
 FORMULA_MAX_LENGTH_IN_CHARS = 2 ** 19
 FORMULA_MAX_LENGTH_IN_TOKENS = 1024
 TOKENIZER_BATCH_SIZE = 2 ** 10
@@ -46,25 +46,29 @@ def get_batched_iterator_for_tokenizer(path_to_dataset_root):
 	
 
 def get_trained_tokenizer(path_to_dataset_root):
-	tokenizer = AutoTokenizer.from_pretrained("gpt2")
-	
-	tokenizer.normalizer = nSequence([
-		Replace("(", " ( "),
-		Replace(")", " ) "),
-		Replace("!", " ! "),
-		Replace("#", " # "),
-		Replace("@", " @ "),
-	])
+	tokenizer = AutoTokenizer.from_pretrained("roberta-base")
+
+	special_symbols = [
+		"==", "=",
+		"<=", "<",
+		">=", ">",
+		"(", ")", "[", "]", "{", "}",
+		"+", "-", "*", "/",
+		"|", "&", "^", "~",
+		"#", "@", "$", "%", "\\",
+	]
+	tokenizer.normalizer = nSequence([Replace(ch, f" {ch} ") for ch in special_symbols])
+
 	tokenizer.pre_tokenizer = pSequence([
 		Punctuation(),
 		Whitespace(),
 		ByteLevel()
 	])
-	tokenizer.train_new_from_iterator(
+
+	tokenizer = tokenizer.train_new_from_iterator(
 		get_batched_iterator_for_tokenizer(path_to_dataset_root),
 		VOCAB_SIZE
 	)
-	tokenizer.pad_token = tokenizer.eos_token
 
 	return tokenizer
 

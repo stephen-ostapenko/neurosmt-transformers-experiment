@@ -20,7 +20,7 @@ import evaluate
 import datasets
 
 
-FORMULA_MAX_LENGTH_IN_TOKENS = 1024
+FORMULA_MAX_LENGTH_IN_TOKENS = 2048
 TOKENIZER_BATCH_SIZE = 2 ** 10
 
 DEVICE_VAL_BATCH_SIZE = os.environ["DEVICE_VAL_BATCH_SIZE"]
@@ -56,6 +56,7 @@ class FormulaDataset(Dataset):
 				
 				if len(formula["input_ids"]) > max_length:
 					indices_to_delete.append(cur_idx - 1)
+					print("w: ignoring formula because of it has too many tokens")
 					continue
 
 				self.samples.append({ **formula, "label": label })
@@ -140,7 +141,10 @@ def evaluate_model_on_dataset(model, dataset, tokenizer):
 		return
 
 	dataset = datasets.Dataset.from_generator(dataset.get_iterator)
-	dataset = dataset.map(lambda s: tokenizer(s["text"], truncation=True, padding="max_length"), batched=True)
+	dataset = dataset.map(
+		lambda s: tokenizer(s["text"], padding="max_length", max_length=FORMULA_MAX_LENGTH_IN_TOKENS),
+		batched=True
+	)
 	dataset.set_format("torch")
 
 	device = model.device
@@ -171,7 +175,7 @@ def evaluate_model_on_dataset(model, dataset, tokenizer):
 		for metric_name, metric in metric_evaluators.items():
 			if metric_name.endswith("roc_auc"):
 				metric.add_batch(references=batch["label"], prediction_scores=scores)
-			elif metric_name == "avg_precision":
+			elif metric_name.endswith("avg_precision"):
 				metric.update(target=batch["label"], preds=scores)
 			else:
 				metric.add_batch(references=batch["label"], predictions=predictions)
@@ -181,7 +185,7 @@ def evaluate_model_on_dataset(model, dataset, tokenizer):
 
 	metrics_dict = dict()
 	for metric_name, metric in metric_evaluators.items():
-		if metric_name == "avg_precision":
+		if metric_name.endswith("avg_precision"):
 			metrics_dict[metric_name] = metric.compute().item()
 		else:
 			metrics_dict[metric_name] = list(metric.compute().values())[0]
@@ -200,7 +204,7 @@ def evaluate_model_on_dataset(model, dataset, tokenizer):
 	print_confusion_matrix(conf_mat)
 
 
-def run_gpt2_evaluation(model_name, dataset_labels, merge_stages):
+def run_roberta_evaluation(model_name, dataset_labels, merge_stages):
 	print(f"\nevaluating {model_name} on {dataset_labels}\n")
 
 	tokenizer = AutoTokenizer.from_pretrained(f"{model_name}-tokenizer", local_files_only=True)
@@ -245,7 +249,7 @@ def get_args():
 
 args = get_args()
 
-run_gpt2_evaluation(
+run_roberta_evaluation(
 	model_name=args.name,
 	dataset_labels=args.ds,
 	merge_stages=args.merge_stages,

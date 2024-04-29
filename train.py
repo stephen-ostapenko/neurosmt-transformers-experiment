@@ -9,6 +9,7 @@ import numpy as np
 import torch
 from torch.utils.data import Dataset, DataLoader
 
+from torchmetrics.classification import BinaryAveragePrecision
 from torchmetrics.functional.classification import binary_confusion_matrix
 
 from tokenizers.normalizers import Replace, Sequence as nSequence
@@ -21,16 +22,16 @@ import evaluate
 import datasets
 
 
-VOCAB_SIZE = 2 ** 17
-FORMULA_MAX_LENGTH_IN_TOKENS = 1024
+VOCAB_SIZE = 2 ** 14
+FORMULA_MAX_LENGTH_IN_TOKENS = 2048
 TOKENIZER_BATCH_SIZE = 2 ** 10
 
 GRADIENT_ACCUMULATION_STEPS = 8
 DEVICE_TRAIN_BATCH_SIZE = 8
-DEVICE_VAL_BATCH_SIZE = 64
+DEVICE_VAL_BATCH_SIZE = 32
 
-TRAIN_EPOCHS = 10
-FINETUNE_EPOCHS = 5
+TRAIN_EPOCHS = 7
+FINETUNE_EPOCHS = 3
 
 torch.set_num_threads(16)
 
@@ -59,6 +60,7 @@ class FormulaDataset(Dataset):
 				
 				if len(formula["input_ids"]) > max_length:
 					indices_to_delete.append(cur_idx - 1)
+					print("w: ignoring formula because of it has too many tokens")
 					continue
 
 				self.samples.append({ **formula, "label": label })
@@ -124,6 +126,7 @@ def get_dataset(stage, dataset_labels):
 
 accuracy_metric = evaluate.load("accuracy")
 roc_auc_metric = evaluate.load("roc_auc")
+avg_precision_metric = BinaryAveragePrecision()
 
 def compute_metrics(eval_pred):
 	def calc_softmax(scores):
@@ -138,13 +141,18 @@ def compute_metrics(eval_pred):
 
 	try:
 		roc_auc = roc_auc_metric.compute(references=labels, prediction_scores=scores)
-
 	except ValueError as e:
 		roc_auc = float('nan')
+
+	try:
+		avg_precision = avg_precision_metric(target=torch.from_numpy(labels), preds=torch.from_numpy(scores)).item()
+	except ValueError as e:
+		avg_precision = float('nan')
 
 	return {
 		"acc": accuracy["accuracy"],
 		"roc_auc": roc_auc if type(roc_auc) is float else roc_auc["roc_auc"],
+		"avg_precision": avg_precision,
 	}
 
 
@@ -163,13 +171,23 @@ def print_confusion_matrix(conf_mat):
 
 def evaluate_model_on_dataset(model, dataset, tokenizer):
 	print(f"\nevaluating on {dataset.stage} dataset (len is {len(dataset)})\n")
+	if len(dataset) == 0:
+		print("skipping")
+		return
 
 	dataset = datasets.Dataset.from_generator(dataset.get_iterator)
-	dataset = dataset.map(lambda s: tokenizer(s["text"], truncation=True, padding="max_length"), batched=True)
+	dataset = dataset.map(
+		lambda s: tokenizer(s["text"], padding="max_length", max_length=FORMULA_MAX_LENGTH_IN_TOKENS),
+		batched=True
+	)
 	dataset.set_format("torch")
 
 	device = model.device
+	if str(device) == "cpu" and torch.cuda.is_available():
+		device = torch.device("cuda:0")
+
 	print("\n", device, "\n", sep="")
+	model = model.to(device)
 
 	dataloader = DataLoader(dataset, batch_size=DEVICE_VAL_BATCH_SIZE)
 
@@ -177,6 +195,7 @@ def evaluate_model_on_dataset(model, dataset, tokenizer):
 		metric_name: evaluate.load(metric_name) \
 			for metric_name in ["accuracy", "precision", "recall", "f1", "roc_auc"]
 	}
+	metric_evaluators["avg_precision"] = BinaryAveragePrecision()
 
 	all_outputs, all_targets = [], []
 	for batch in tqdm(dataloader):
@@ -187,10 +206,12 @@ def evaluate_model_on_dataset(model, dataset, tokenizer):
 
 		scores = torch.softmax(out.logits, dim=-1)[:, 1]
 		predictions = torch.argmax(out.logits, dim=-1)
-		
+
 		for metric_name, metric in metric_evaluators.items():
 			if metric_name.endswith("roc_auc"):
 				metric.add_batch(references=batch["label"], prediction_scores=scores)
+			elif metric_name.endswith("avg_precision"):
+				metric.update(target=batch["label"], preds=scores)
 			else:
 				metric.add_batch(references=batch["label"], predictions=predictions)
 
@@ -199,11 +220,14 @@ def evaluate_model_on_dataset(model, dataset, tokenizer):
 
 	metrics_dict = dict()
 	for metric_name, metric in metric_evaluators.items():
-		metrics_dict[metric_name] = list(metric.compute().values())[0]
+		if metric_name.endswith("avg_precision"):
+			metrics_dict[metric_name] = metric.compute().item()
+		else:
+			metrics_dict[metric_name] = list(metric.compute().values())[0]
 
 	print()
 	for metric_name, metric_value in metrics_dict.items():
-		print(metric_name.rjust(11, " "), ":", metric_value)
+		print(metric_name.rjust(15, " "), ":", metric_value)
 
 	all_outputs = torch.flatten(torch.cat(all_outputs))
 	all_targets = torch.flatten(torch.cat(all_targets))
@@ -215,7 +239,7 @@ def evaluate_model_on_dataset(model, dataset, tokenizer):
 	print_confusion_matrix(conf_mat)
 
 
-def run_gpt2_experiment(model_name, dataset_labels, train_model, train_tokenizer):
+def run_roberta_experiment(model_name, dataset_labels, train_model, train_tokenizer):
 	if train_tokenizer and not train_model:
 		raise Error("can't retrain tokenizer without retraining model")
 
@@ -225,37 +249,39 @@ def run_gpt2_experiment(model_name, dataset_labels, train_model, train_tokenizer
 	val_ds = get_dataset("val", dataset_labels)
 	test_ds = get_dataset("test", dataset_labels)
 
-	tokenizer = AutoTokenizer.from_pretrained("gpt2")
+	tokenizer = AutoTokenizer.from_pretrained("roberta-base")
 
 	if train_tokenizer:
-		tokenizer.normalizer = nSequence([
-			Replace("(", " ( "),
-			Replace(")", " ) "),
-			Replace("!", " ! "),
-			Replace("#", " # "),
-			Replace("@", " @ "),
-		])
+		special_symbols = [
+			"==", "=",
+			"<=", "<",
+			">=", ">",
+			"(", ")", "[", "]", "{", "}",
+			"+", "-", "*", "/",
+			"|", "&", "^", "~",
+			"#", "@", "$", "%", "\\",
+		]
+		tokenizer.normalizer = nSequence([Replace(ch, f" {ch} ") for ch in special_symbols])
+
 		tokenizer.pre_tokenizer = pSequence([
 			Punctuation(),
 			Whitespace(),
 			ByteLevel()
 		])
-		tokenizer.train_new_from_iterator(train_ds.get_iterator_for_tokenizer(), VOCAB_SIZE)
 
-	tokenizer.pad_token = tokenizer.eos_token
+		tokenizer = tokenizer.train_new_from_iterator(train_ds.get_iterator_for_tokenizer(), VOCAB_SIZE)
 
 	train_ds.setup(tokenizer, FORMULA_MAX_LENGTH_IN_TOKENS)
 	val_ds.setup(tokenizer, FORMULA_MAX_LENGTH_IN_TOKENS)
 	test_ds.setup(tokenizer, FORMULA_MAX_LENGTH_IN_TOKENS)
 
 	if train_model:
-		config = transformers.GPT2Config(
-			vocab_size=VOCAB_SIZE,
-			n_positions=FORMULA_MAX_LENGTH_IN_TOKENS,
-			pad_token_id=tokenizer.eos_token_id,
+		config = transformers.RobertaConfig(
+			vocab_size=tokenizer.vocab_size,
+			max_position_embeddings=FORMULA_MAX_LENGTH_IN_TOKENS,
 		)
 
-		model = transformers.GPT2ForSequenceClassification(config)
+		model = transformers.RobertaForSequenceClassification(config)
 
 		training_args = transformers.TrainingArguments(
 			output_dir=model_name,
@@ -267,11 +293,13 @@ def run_gpt2_experiment(model_name, dataset_labels, train_model, train_tokenizer
 			weight_decay=1,
 			logging_strategy="steps",
 			logging_steps=0.01,
-			evaluation_strategy="epoch",
-			save_strategy="epoch",
+			evaluation_strategy="steps",
+			eval_steps=0.02,
+			save_strategy="steps",
+			save_steps=0.02,
 			load_best_model_at_end=True,
-			metric_for_best_model="eval_roc_auc",
-			greater_is_better=True,
+			metric_for_best_model="eval_loss",
+			greater_is_better=False,
 			push_to_hub=False,
 			report_to="tensorboard",
 			logging_dir=f"{model_name}-logs",
@@ -289,8 +317,7 @@ def run_gpt2_experiment(model_name, dataset_labels, train_model, train_tokenizer
 		)
 
 	else:
-		model = transformers.AutoModelForSequenceClassification.from_pretrained("gpt2", num_labels=2)
-		model.config.pad_token_id = model.config.eos_token_id
+		model = transformers.AutoModelForSequenceClassification.from_pretrained("roberta-base", num_labels=2)
 
 		training_args = transformers.TrainingArguments(
 			output_dir=model_name,
@@ -302,11 +329,13 @@ def run_gpt2_experiment(model_name, dataset_labels, train_model, train_tokenizer
 			weight_decay=1,
 			logging_strategy="steps",
 			logging_steps=0.01,
-			evaluation_strategy="epoch",
-			save_strategy="epoch",
+			evaluation_strategy="steps",
+			eval_steps=0.02,
+			save_strategy="steps",
+			save_steps=0.02,
 			load_best_model_at_end=True,
-			metric_for_best_model="eval_roc_auc",
-			greater_is_better=True,
+			metric_for_best_model="eval_loss",
+			greater_is_better=False,
 			push_to_hub=False,
 			report_to="tensorboard",
 			logging_dir=f"{model_name}-logs",
@@ -332,7 +361,7 @@ def run_gpt2_experiment(model_name, dataset_labels, train_model, train_tokenizer
 	evaluate_model_on_dataset(model, test_ds, tokenizer)
 
 
-run_gpt2_experiment(
+run_roberta_experiment(
 	model_name=sys.argv[1],
 	train_model=("model" in sys.argv[2]),
 	train_tokenizer=("tokenizer" in sys.argv[2]),
